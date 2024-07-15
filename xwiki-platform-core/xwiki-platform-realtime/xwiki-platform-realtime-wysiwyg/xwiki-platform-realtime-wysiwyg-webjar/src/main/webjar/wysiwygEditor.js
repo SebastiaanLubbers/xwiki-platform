@@ -142,10 +142,43 @@ define('xwiki-realtime-wysiwyg', [
         this._onAbort();
       });
 
+      this._addNetfluxChannelToSubmittedData();
+
       // Export the typing tests to the window.
       // Call like `test = easyTest()`
       // Terminate the test like `test.cancel()`
       window.easyTest = this._easyTest.bind(this);
+    }
+
+    _addNetfluxChannelToSubmittedData() {
+      // Indicate the Netflux channel used to synchronize the edited content when performing the HTML conversion (e.g.
+      // when refreshing the content after a macro is inserted) in order to render the content using the effective
+      // author associated with this channel (and thus prevent privilege escalation through script injection in the
+      // realtime session).
+      const convertHTMLListener = (event, conversionParams) => {
+        conversionParams.netfluxChannel = this._channel;
+      };
+      $(document).on('xwiki:wysiwyg:convertHTML', convertHTMLListener);
+
+      // Indicate the Netflux channel used to synchronize the edited content when saving the content.
+      const fieldSet = this._editor.getToolBar().closest('form, .form, body')
+        .querySelector('input[name=form_token]').parentNode;
+      let netfluxChannelInput = fieldSet.querySelector(
+        `input[name=netfluxChannel][data-for="${CSS.escape(this._editor.getFormFieldName())}"]`);
+      if (!netfluxChannelInput) {
+        netfluxChannelInput = document.createElement('input');
+        netfluxChannelInput.setAttribute('type', 'hidden');
+        netfluxChannelInput.setAttribute('name', 'netfluxChannel');
+        netfluxChannelInput.setAttribute('data-for', this._editor.getFormFieldName());
+        fieldSet.prepend(netfluxChannelInput);
+      }
+      netfluxChannelInput.value = this._channel;
+
+      // Cleanup when we leave the realtime session.
+      this._removeNetfluxChannelFromSubmittedData = () => {
+        $(document).off('xwiki:wysiwyg:convertHTML', convertHTMLListener);
+        netfluxChannelInput.value = '';
+      };
     }
 
     /**
@@ -223,21 +256,12 @@ define('xwiki-realtime-wysiwyg', [
             return null;
           }
         },
-        getSaveValue: () => {
-          const fieldName = this._editor.getFormFieldName();
-          return {
-            [fieldName]: this._editor.getOutputHTML(),
-            RequiresHTMLConversion: fieldName,
-            [`${fieldName}_syntax`]: 'xwiki/2.1'
-          };
-        },
-        getTextAtCurrentRevision: (revision) => {
+        getTextAtCurrentRevision: () => {
           return $.get(XWiki.currentDocument.getURL('get', $.param({
             xpage:'get',
             outputSyntax:'annotatedhtml',
             outputSyntaxVersion:'5.0',
-            transformations:'macro',
-            rev:revision
+            transformations:'macro'
           })));
         },
         safeCrash: (reason, debugLog) => {
@@ -270,19 +294,21 @@ define('xwiki-realtime-wysiwyg', [
       // If no new data (someone has just joined or left the channel), get the latest known values.
       const updatedData = newdata || this._connection.userData;
 
-      const ownerDocument = this._editor.getContentWrapper().ownerDocument;
+      const contentWrapper = this._editor.getContentWrapper();
+      const contentWrapperTop = $(contentWrapper).offset().top;
+      const ownerDocument = contentWrapper.ownerDocument;
       $(ownerDocument).find('.rt-user-position').remove();
       const positions = {};
       this._connection.userList.users.filter(id => updatedData[id]?.['cursor_' + EDITOR_TYPE]).forEach(id => {
         const data = updatedData[id];
         const name = RealtimeEditor._getPrettyName(data.name);
         // Set the user position.
-        const element = ownerDocument.evaluate(data['cursor_' + EDITOR_TYPE], this._editor.getContentWrapper(), null,
+        const element = ownerDocument.evaluate(data['cursor_' + EDITOR_TYPE], contentWrapper, null,
           XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
         if (!element) {
           return;
         }
-        const top = $(element).position().top;
+        const top = $(element).offset().top - contentWrapperTop;
         if (!positions[top]) {
           positions[top] = [id];
         } else {
@@ -304,7 +330,7 @@ define('xwiki-realtime-wysiwyg', [
           // element, e.g. the BODY element for the standalone edit mode).
           'top': top > 0 ? top + 'px' : ''
         });
-        $(this._editor.getContentWrapper()).after($indicator);
+        $(contentWrapper).after($indicator);
       });
     }
 
@@ -403,8 +429,8 @@ define('xwiki-realtime-wysiwyg', [
           crypto: Crypto,
           editor: EDITOR_TYPE,
           getCursor: () => {
-            const selection = this._editor.getSelection();
-            let node = selection?.rangeCount && selection.getRangeAt(0).startContainer;
+            // We take into account only the first selection range when showing the user cursor.
+            let node = this._editor.getSelection()[0]?.startContainer;
             if (!node) {
               return '';
             }
@@ -463,10 +489,6 @@ define('xwiki-realtime-wysiwyg', [
       // Build a DOM from HyperJSON, diff and patch the editor, then wait for the widgets to be ready (in case they had
       // to be reloaded, e.g. rendering macros have to be rendered server-side).
       await this._patchedEditor.setHyperJSON(remoteContent);
-
-      // The remote content might have changed while we were waiting for the local content to be updated. If that was
-      // the case then the local content should have been merged when the editor was unlocked.
-      remoteContent = info.realtime.getUserDoc();
 
       const localContent = this._patchedEditor.getHyperJSON();
       if (localContent !== remoteContent) {
@@ -546,6 +568,9 @@ define('xwiki-realtime-wysiwyg', [
       // And remove the user caret indicators.
       this._changeUserIcons({});
 
+      // Don't include the channel in the submitted data if we're not connected to the realtime session.
+      this._removeNetfluxChannelFromSubmittedData();
+
       // Typing tests require the realtime session to be active.
       delete window.easyTest;
 
@@ -596,16 +621,10 @@ define('xwiki-realtime-wysiwyg', [
     }
 
     _easyTest() {
-      let container, offset;
-      const selection = this._editor.getSelection();
-      const range = selection?.rangeCount && selection.getRangeAt(0);
-      if (range) {
-        container = range.startContainer;
-        offset = range.startOffset;
-      }
-      const test = TypingTest.testInput(this._editor.getContentWrapper(), container, offset, this._onLocal.bind(this));
-      this._onLocal();
-      return test;
+      return TypingTest.testInput(
+        () => this._editor.getContentWrapper()?.ownerDocument.defaultView.getSelection(),
+        this._onLocal.bind(this)
+      );
     }
 
     _getXPath(element) {

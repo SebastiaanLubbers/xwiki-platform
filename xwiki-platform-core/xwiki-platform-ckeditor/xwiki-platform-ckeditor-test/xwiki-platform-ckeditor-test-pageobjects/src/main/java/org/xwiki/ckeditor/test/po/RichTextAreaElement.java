@@ -120,6 +120,24 @@ public class RichTextAreaElement extends BaseElement
         }
     }
 
+    /**
+     * Clicks somewhere on the edited content.
+     * 
+     * @param contentSelector specifies an element from the edited content to click on
+     * @since 15.10.11
+     * @since 16.4.1
+     * @since 16.6.0RC1
+     */
+    public void click(By contentSelector)
+    {
+        try {
+            WebElement rootEditableElement = getRootEditableElement();
+            getDriver().findElementWithoutWaiting(rootEditableElement, contentSelector).click();
+        } finally {
+            maybeSwitchToDefaultContent();
+        }
+    }
+
     protected void maybeSwitchToEditedContent()
     {
         if (this.isFrame) {
@@ -271,7 +289,7 @@ public class RichTextAreaElement extends BaseElement
             if (switchToFrame) {
                 getDriver().switchTo().frame(this.container);
             }
-            return getDriver().findElement(By.tagName("body"));
+            return getDriver().findElementWithoutWaitingWithoutScrolling(By.tagName("body"));
         } else {
             return this.container;
         }
@@ -333,6 +351,27 @@ public class RichTextAreaElement extends BaseElement
         getFromEditedContent(() -> {
             verifier.accept(this.content);
             return null;
+        });
+    }
+
+    /**
+     * Wait until the macros present in the rich text area are rendered. Whenever a macro is insered or updated the
+     * entire content is reloaded in order for the macros to be rendered server-side.
+     *
+     * @since 16.3.0RC1
+     */
+    public void waitUntilMacrosAreRendered()
+    {
+        getDriver().waitUntilCondition(driver -> {
+            return getFromEditedContent(() -> {
+                WebElement root = getRootEditableElement(false);
+                if (root.getAttribute("contenteditable").equals("true")) {
+                    return getDriver()
+                        .findElementsWithoutWaiting(root, By.cssSelector(".macro[data-widget='xwiki-macro']")).stream()
+                        .allMatch(macroWidget -> "1".equals(macroWidget.getAttribute("data-cke-widget-upcasted")));
+                }
+                return false;
+            });
         });
     }
 }
