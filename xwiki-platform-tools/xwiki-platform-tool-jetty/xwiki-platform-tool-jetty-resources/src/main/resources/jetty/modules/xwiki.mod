@@ -23,17 +23,13 @@
 
 [depend]
 ext
-resources
-server
-logging
+console-capture
+ee10-apache-jsp
+ee10-deploy
+ee10-websocket-jakarta
 http
 http-forwarded
-annotations
-deploy
-requestlog
-websocket
-apache-jsp
-console-capture
+work
 
 [xml]
-etc/jetty-xwiki.xml
+etc/xwiki.xml
